@@ -24,7 +24,7 @@ def read_api_key() -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Test DeepSeek through VM3's SSH SOCKS tunnel.")
+    parser = argparse.ArgumentParser(description="Test DeepSeek through the local SSH SOCKS tunnel.")
     parser.add_argument("--proxy-only", action="store_true", help="Check egress without an API key.")
     parser.add_argument("--port", type=int, default=1080, help="Loopback SOCKS port (default: 1080).")
     parser.add_argument(

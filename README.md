@@ -1,25 +1,29 @@
 # DSjumper
 
-Persistent, loopback-only SSH SOCKS5 tunnel from VM3 to S5 for DeepSeek API traffic.
+Persistent, loopback-only SSH SOCKS5 tunnel from VM2 to S5 for DeepSeek API traffic.
 
 ```text
-VM3 Python client -> 127.0.0.1:1080 -> SSH over ZeroTier -> S5 -> DeepSeek API
+VM2 Python client     -> 127.0.0.1:1080 -> SSH over ZeroTier -> S5 -> DeepSeek API
+HTTP client (VS Code) -> 127.0.0.1:3128 -> 127.0.0.1:1080 -> SSH over ZeroTier -> S5 -> DeepSeek API
 ```
 
 ## Configuration
 
 | Setting | Value |
 | --- | --- |
-| VM3 | Windows, user `celltester`, ZeroTier IP `172.30.200.3` |
+| VM2 | Windows, user `celltester`, ZeroTier IP `172.30.200.3` |
 | S5 | Ubuntu, ZeroTier IP `172.30.100.1` |
 | SSH target | `sihot@172.30.100.1:22` |
 | Client proxy | `socks5h://127.0.0.1:1080` |
 | Scheduled task | `DeepSeek-S5-SOCKS` |
 | Supervisor | [start-s5-socks.ps1](start-s5-socks.ps1) |
+| HTTP bridge | `http://127.0.0.1:3128` -> `socks5://127.0.0.1:1080` |
+| Bridge task | `DeepSeek-S5-HTTP-Bridge` |
+| Bridge supervisor | [start-http-bridge.ps1](start-http-bridge.ps1) |
 | Windows deployment | [deploy-s5-socks.ps1](deploy-s5-socks.ps1) |
 | API test | [deepseek_smoke.py](deepseek_smoke.py) |
 
-The workspace on VM3 is installed at `C:\Users\celltester\DSjumper`. On another
+The workspace on VM2 is installed at `C:\Users\celltester\DSjumper`. On another
 computer, run the scripts from a stable folder owned by the current user. The
 supervisor defaults to the current user's `.ssh\id_ed25519_s5_proxy` identity;
 `-IdentityFile` can specify a different existing key.
@@ -54,17 +58,79 @@ SSH keepalives detect unresponsive connections so the supervisor can reconnect.
 Binding failures terminate SSH instead of leaving an unusable tunnel running.
 Do not run the command manually on `1080` while the scheduled task is active.
 
+## HTTP CONNECT Bridge (3128)
+
+Some clients, including VS Code, support only an HTTP proxy. A loopback-only
+`pproxy` instance front-ends the SOCKS5 tunnel so that `http://127.0.0.1:3128`
+accepts `CONNECT` and forwards to `socks5://127.0.0.1:1080`:
+
+```powershell
+& .\.venv\Scripts\python.exe -m pproxy -l http://127.0.0.1:3128 -r socks5://127.0.0.1:1080
+```
+
+`pproxy` encodes the `CONNECT` authority as a SOCKS5 domain name (ATYP `0x03`),
+so destination hostnames are resolved through the tunnel rather than locally.
+The listener binds `127.0.0.1` only. The bridge never modifies the `1080`
+tunnel; it is only a client of it. [http_connect_socks.py](http_connect_socks.py)
+is a standalone alternative implementation that is not used by the task.
+
+The scheduled task `DeepSeek-S5-HTTP-Bridge` runs
+[start-http-bridge.ps1](start-http-bridge.ps1) at current-user logon:
+
+```powershell
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\Users\celltester\DSjumper\start-http-bridge.ps1" -ListenPort 3128 -SocksPort 1080
+```
+
+The supervisor restarts `pproxy` if it exits and retries with the same bounded
+5, 10, then 30 second delays, resetting after a run of at least 60 seconds. A
+per-port mutex makes a duplicate supervisor exit immediately. It never displaces
+an existing loopback listener: if another process already serves the port, the
+supervisor waits and logs that instead of competing, so a handover cannot drop
+active requests; it binds the port within one retry interval once that listener
+exits. It uses the venv interpreter, which resolves `pproxy` from
+`requirements.txt`.
+
+VS Code reaches it through user settings only:
+
+```json
+"http.proxy": "http://127.0.0.1:3128",
+"http.proxyStrictSSL": true
+```
+
+TLS verification stays with the client and is not weakened. No machine-wide
+proxy settings are changed, and the bridge is not applied to unrelated clients.
+
+Verify the bridge:
+
+```powershell
+netstat -ano | findstr :3128
+curl.exe --silent --show-error --fail --connect-timeout 10 --max-time 30 --proxy http://127.0.0.1:3128 https://api.ipify.org
+& .\.venv\Scripts\python.exe .\deepseek_smoke.py --proxy-only --http-proxy
+& .\.venv\Scripts\python.exe .\deepseek_smoke.py --http-proxy
+```
+
+The `3128` and `1080` egress addresses must match, which confirms traffic still
+leaves through S5. The `3128` listener must be part of the process tree rooted at
+[start-http-bridge.ps1](start-http-bridge.ps1): a `python.exe` running `pproxy`
+that descends from the supervisor `powershell.exe`. The listener may be a child
+**or a grandchild**, because `pproxy`/Python can spawn another Python process, so
+validate by walking the ancestor chain (`ParentProcessId` repeatedly) up to the
+supervisor instead of checking a single parent link.
+
+Never stop the production `3128` listener just to validate it. To test ownership
+handling or any bridge change, start a separate instance on another port first.
+
 ## Prerequisites
 
 - Windows OpenSSH client and PowerShell 5.1.
 - ZeroTier connectivity to S5 on SSH port 22.
 - The dedicated public key authorized for `sihot` on S5.
 - S5's verified host key present in the user's SSH known-hosts file.
-- Python 3.12 and [requirements.txt](requirements.txt) for the smoke test.
+- Python 3.12 and [requirements.txt](requirements.txt) for the smoke test and the HTTP CONNECT bridge (`pproxy`).
 
 The installed key has no passphrase to support unattended reconnects. Its
 Windows ACL is protected and restricted to `celltester`, SYSTEM, and
-Administrators. Keep the private key on VM3; only its public key belongs on S5.
+Administrators. Keep the private key on VM2; only its public key belongs on S5.
 Do not commit either API credentials or private SSH keys.
 
 ## Deploy To Another Windows Computer
@@ -76,7 +142,7 @@ script does not install system software or enroll a ZeroTier device.
 Copy [deploy-s5-socks.ps1](deploy-s5-socks.ps1),
 [start-s5-socks.ps1](start-s5-socks.ps1), [deepseek_smoke.py](deepseek_smoke.py),
 and [requirements.txt](requirements.txt) into a stable folder such as
-`$HOME\DSjumper`. Do not copy `.venv`, private keys, credentials, or logs from VM3.
+`$HOME\DSjumper`. Do not copy `.venv`, private keys, credentials, or logs from VM2.
 Run PowerShell as the user who should own the task, not as another administrator
 account. In that folder, run:
 
@@ -162,10 +228,19 @@ Inspect the installed task and listener:
 Get-ScheduledTask -TaskName 'DeepSeek-S5-SOCKS'
 Get-ScheduledTaskInfo -TaskName 'DeepSeek-S5-SOCKS'
 Get-NetTCPConnection -LocalPort 1080 -State Listen
+Get-ScheduledTask -TaskName 'DeepSeek-S5-HTTP-Bridge'
+Get-ScheduledTaskInfo -TaskName 'DeepSeek-S5-HTTP-Bridge'
+Get-NetTCPConnection -LocalPort 3128 -State Listen
 ```
 
-The listener must bind only to `127.0.0.1`. Its owning process should be `ssh.exe`,
-with a parent PowerShell process running the supervisor.
+Both listeners must bind only to `127.0.0.1`. For `1080`, the owning process
+should be `ssh.exe` with a parent PowerShell process running the supervisor,
+because the supervisor starts SSH directly. For `3128`, do not check a single
+parent link: the listener is a `python.exe` running `pproxy` somewhere below the
+supervisor PowerShell process, and may be several generations down because
+`pproxy`/Python can spawn another Python process. Walk the ancestor chain
+(`ParentProcessId` repeatedly) until it reaches the supervisor or a non-matching
+process.
 
 Start or stop the task as needed:
 
@@ -178,10 +253,29 @@ Verify the listener disappears after stopping the task. Killing just the SSH
 child while leaving the supervisor running triggers an automatic reconnect; it
 does not permanently stop the tunnel.
 
+The bridge task behaves the same way:
+
+```powershell
+Start-ScheduledTask -TaskName 'DeepSeek-S5-HTTP-Bridge'
+Stop-ScheduledTask -TaskName 'DeepSeek-S5-HTTP-Bridge'
+```
+
+Stopping the bridge task terminates the supervisor but can leave its `pproxy`
+child orphaned and still serving `3128`. That is intentional and safe: the
+orphan keeps carrying traffic, and the next supervisor run detects the occupied
+port and waits rather than competing or killing it. To hand the port back to the
+task cleanly, stop the orphan `pproxy` for `3128` first (identify it with
+`Get-NetTCPConnection -LocalPort 3128 -State Listen`), or simply log off and back
+on so the task starts with the port free.
+
 ## Logs And Troubleshooting
 
 - [s5-socks-1080.log](s5-socks-1080.log): supervisor starts, child PIDs, exits, and retry delays. Rotates to a `.previous` file after exceeding approximately 512 KiB.
 - [s5-socks-1080.stderr.log](s5-socks-1080.stderr.log): SSH diagnostics, overwritten each time the supervisor starts SSH.
+- [http-bridge-3128.log](http-bridge-3128.log): bridge supervisor starts, `pproxy` PIDs, exits, and retry delays. Rotates like the tunnel log.
+- [http-bridge-3128.out.log](http-bridge-3128.out.log) and [http-bridge-3128.stderr.log](http-bridge-3128.stderr.log): `pproxy` output, overwritten each time the supervisor starts `pproxy`.
+- Bridge exit codes logged as `unavailable` are expected: Windows PowerShell 5.1 discards `Start-Process` exit codes whenever output is redirected, so the `pproxy` stderr file is the diagnostic source instead.
+- Bridge logs `Port 3128 already served by PID=...; waiting` while another process holds the port; the bridge still works, and the supervisor takes over after that listener exits.
 - No listener: check task state, ZeroTier connectivity, and SSH diagnostics.
 - Authentication failure: verify the dedicated key and S5 public-key authorization. Batch mode intentionally refuses password prompts.
 - Host-key failure: verify S5's fingerprint through a trusted channel. Do not disable strict host checking or blindly replace known-host entries.
@@ -203,9 +297,13 @@ Verified on **2026-10-06**:
 - Production `1080` tunnel: scheduled-task-owned SSH, loopback-only listening, and ipify HTTP 200.
 - Reconnect: terminating the SSH child produced a replacement under the same supervisor; listening and egress recovered within 8.7 seconds.
 - Final DeepSeek smoke test after reconnect: HTTP 200 with a nonempty completion.
+- HTTP bridge on `3128`: loopback-only listening, `curl.exe` ipify HTTP 200 through `http://127.0.0.1:3128`, and `deepseek_smoke.py --proxy-only --http-proxy` HTTP 200. The `3128` egress address matched the `1080` egress address, confirming traffic still leaves through S5.
+- Bridge supervisor resilience: terminating the `pproxy` child on an isolated `3129` test port produced a replacement listener and restored egress; the temporary `3129` listener and its logs were removed afterward.
+- Bridge handover: with `3128` already served, the supervisor logged `Port 3128 already served ...; waiting` and left the existing listener and its traffic untouched.
+- Bridge process tree: the production `3128` listener was a grandchild of the supervisor (`start-http-bridge.ps1` powershell.exe -> venv `python.exe` pproxy launcher -> `python.exe` listener), confirming the listener may be more than one generation below the supervisor.
 - Temporary preflight task and `1081` listener removed. No machine-wide proxy changes; no further S5 changes during persistent-task setup.
 
 The logon trigger configuration was inspected, but an actual reboot/logon was
-not exercised. The task is installed on VM3; these files alone do not register it
+not exercised. The task is installed on VM2; these files alone do not register it
 on another machine. The project currently contains a standalone smoke test, not
 an integrated Agent application.

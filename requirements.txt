@@ -1,1 +1,2 @@
 requests[socks]>=2.32.4,<3
+pproxy>=2.7.9,<3
