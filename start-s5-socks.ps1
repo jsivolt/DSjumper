@@ -1,13 +1,13 @@
 param(
     [ValidateRange(1, 65535)]
-    [int]$ListenPort = 1080
+    [int]$ListenPort = 1080,
+    [string]$IdentityFile = (Join-Path $env:USERPROFILE '.ssh\id_ed25519_s5_proxy')
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $sshExecutable = Join-Path $env:SystemRoot 'System32\OpenSSH\ssh.exe'
-$identityFile = 'C:\Users\celltester\.ssh\id_ed25519_s5_proxy'
 $logFile = Join-Path $PSScriptRoot "s5-socks-$ListenPort.log"
 $errorFile = Join-Path $PSScriptRoot "s5-socks-$ListenPort.stderr.log"
 $retrySeconds = @(5, 10, 30)
