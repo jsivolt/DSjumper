@@ -27,10 +27,19 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Test DeepSeek through VM3's SSH SOCKS tunnel.")
     parser.add_argument("--proxy-only", action="store_true", help="Check egress without an API key.")
     parser.add_argument("--port", type=int, default=1080, help="Loopback SOCKS port (default: 1080).")
+    parser.add_argument(
+        "--http-proxy",
+        action="store_true",
+        help="Use the local HTTP CONNECT bridge at 127.0.0.1:3128.",
+    )
     args = parser.parse_args()
     if not 1 <= args.port <= 65535:
         parser.error("--port must be between 1 and 65535")
-    proxy_url = f"socks5h://127.0.0.1:{args.port}"
+    proxy_url = (
+        "http://127.0.0.1:3128"
+        if args.http_proxy
+        else f"socks5h://127.0.0.1:{args.port}"
+    )
 
     try:
         with requests.Session() as client:
