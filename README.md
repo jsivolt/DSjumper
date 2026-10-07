@@ -21,6 +21,7 @@ HTTP client (VS Code) -> 127.0.0.1:3128 -> 127.0.0.1:1080 -> SSH over ZeroTier -
 | Bridge task | `DeepSeek-S5-HTTP-Bridge` |
 | Bridge supervisor | [start-http-bridge.ps1](start-http-bridge.ps1) |
 | Windows deployment | [deploy-s5-socks.ps1](deploy-s5-socks.ps1) |
+| Linux user service | [linux/dsjump-socks.service](linux/dsjump-socks.service) |
 | API test | [deepseek_smoke.py](deepseek_smoke.py) |
 | Read-only status | [status.ps1](status.ps1) |
 | Client installer | [install-client.ps1](install-client.ps1) |
@@ -125,7 +126,7 @@ supervisor instead of checking a single parent link.
 Never stop the production `3128` listener just to validate it. To test ownership
 handling or any bridge change, start a separate instance on another port first.
 
-## Prerequisites
+## Windows Prerequisites
 
 - Windows OpenSSH client and PowerShell 5.1.
 - ZeroTier connectivity to S5 on SSH port 22.
@@ -183,7 +184,92 @@ retained for troubleshooting and the script exits nonzero; this is not a
 successful deployment. Inspect its logs and task state before attempting a
 rerun. After a successful deployment, separately test an actual logout/login.
 
-## Smoke Tests
+## Linux Client Deployment
+
+The PowerShell deployment, status, and client-configuration scripts are
+Windows-specific. A Linux client uses OpenSSH and a systemd user service; the S5
+server configuration does not otherwise change.
+
+Install OpenSSH Client, Python virtual-environment support, and ZeroTier. Join
+and authorize the ZeroTier network and confirm that `172.30.100.1:22` is
+reachable. The client needs the dedicated public key authorized for `sihot` on
+S5, and S5's host key must be verified through a trusted channel.
+
+Create a dedicated key only if one does not already exist:
+
+```bash
+install -d -m 700 ~/.ssh
+ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_s5_proxy -N '' -C linux-s5-proxy
+chmod 600 ~/.ssh/id_ed25519_s5_proxy
+```
+
+Compare the S5 fingerprint obtained out of band with the key offered by the
+network endpoint. `ssh-keyscan` only retrieves a candidate key; it does not
+verify that key:
+
+```bash
+ssh-keyscan -T 5 -t ed25519 172.30.100.1 2>/dev/null | ssh-keygen -lf -
+```
+
+After verifying the fingerprint, trust it through SSH's interactive host-key
+prompt or add the verified key to `~/.ssh/known_hosts`. Copy the client's
+`.pub` key to S5 and authorize it for `sihot`; use the restrictions
+`no-agent-forwarding,no-X11-forwarding,no-pty` before the public-key fields.
+Keep the private key on the client. Then verify noninteractive authentication:
+
+```bash
+ssh -T -i ~/.ssh/id_ed25519_s5_proxy \
+  -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+  sihot@172.30.100.1 true
+```
+
+Install and enable the included user service:
+
+```bash
+install -D -m 644 linux/dsjump-socks.service \
+  ~/.config/systemd/user/dsjump-socks.service
+systemctl --user daemon-reload
+systemctl --user enable --now dsjump-socks.service
+```
+
+The service binds SOCKS5 to `127.0.0.1:1080`, checks SSH keepalives, and
+restarts SSH after failure. User services normally run while the user manager
+is active. To start at boot even before login, enable lingering for the user
+(requires local sudo if it is not already enabled):
+
+```bash
+loginctl show-user "$USER" -p Linger
+sudo loginctl enable-linger "$USER"
+```
+
+Prepare the Python environment and test the proxy without calling the paid
+DeepSeek API:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+systemctl --user status dsjump-socks.service
+ss -ltn '( sport = :1080 )'
+curl --fail --proxy socks5h://127.0.0.1:1080 https://api.ipify.org
+.venv/bin/python deepseek_smoke.py --proxy-only
+```
+
+Use `journalctl --user -u dsjump-socks.service -f` for service logs. The
+`socks5h` scheme resolves destination names through the tunnel. The service
+does not set global proxy variables or expose the SOCKS port beyond loopback.
+
+The optional HTTP CONNECT bridge for clients such as VS Code requires the
+Python dependencies from `requirements.txt`; it can be started with:
+
+```bash
+.venv/bin/python -m pproxy -l http://127.0.0.1:3128 -r socks5://127.0.0.1:1080
+```
+
+This command is foreground-only; the included Linux unit manages only the
+SOCKS tunnel. The bridge must also bind to loopback and be separately supervised
+if persistent HTTP-proxy access is required.
+
+## Windows Smoke Tests
 
 Run the following from a PowerShell terminal in the workspace. The existing
 isolated environment is `.venv`; if rebuilding it, use:

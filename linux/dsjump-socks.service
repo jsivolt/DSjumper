@@ -1,0 +1,13 @@
+[Unit]
+Description=DSJumper SSH SOCKS tunnel
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/ssh -N -D 127.0.0.1:1080 -i %h/.ssh/id_ed25519_s5_proxy -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o ConnectTimeout=10 -o ConnectionAttempts=1 sihot@172.30.100.1
+Restart=always
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target
