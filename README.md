@@ -22,6 +22,9 @@ HTTP client (VS Code) -> 127.0.0.1:3128 -> 127.0.0.1:1080 -> SSH over ZeroTier -
 | Bridge supervisor | [start-http-bridge.ps1](start-http-bridge.ps1) |
 | Windows deployment | [deploy-s5-socks.ps1](deploy-s5-socks.ps1) |
 | Linux user service | [linux/dsjump-socks.service](linux/dsjump-socks.service) |
+| Linux bridge service | [linux/dsjump-http-bridge.service](linux/dsjump-http-bridge.service) |
+| VS Code Remote proxy settings | [linux/vscode-remote-machine-settings.json](linux/vscode-remote-machine-settings.json) |
+| VS Code Remote proxy installer | [linux/install-vscode-remote-proxy.sh](linux/install-vscode-remote-proxy.sh) |
 | API test | [deepseek_smoke.py](deepseek_smoke.py) |
 | Read-only status | [status.ps1](status.ps1) |
 | Client installer | [install-client.ps1](install-client.ps1) |
@@ -96,15 +99,23 @@ active requests; it binds the port within one retry interval once that listener
 exits. It uses the venv interpreter, which resolves `pproxy` from
 `requirements.txt`.
 
-VS Code reaches it through user settings only:
+VS Code on this machine reaches it through user settings only:
 
 ```json
 "http.proxy": "http://127.0.0.1:3128",
 "http.proxyStrictSSL": true
 ```
 
-TLS verification stays with the client and is not weakened. No machine-wide
-proxy settings are changed, and the bridge is not applied to unrelated clients.
+When VS Code connects to a Linux host over Remote - SSH, the workspace extensions
+run in the remote extension host and the value must be set in the **remote**
+settings instead; `http.proxy` is machine-scoped, so a local User value does not
+apply there. See
+[VS Code Remote Extension Host](#vs-code-remote-extension-host).
+
+TLS verification stays with the client and is not weakened. `http.proxyStrictSSL`
+stays `true`; never work around a proxy or certificate problem by disabling
+verification. No machine-wide proxy settings are changed, and the bridge is not
+applied to unrelated clients.
 
 Verify the bridge:
 
@@ -271,8 +282,8 @@ systemctl --user status dsjump-http-bridge.service
 
 The bridge binds to `127.0.0.1:3128` and forwards through
 `socks5://127.0.0.1:1080`. It starts after the SOCKS tunnel and restarts if
-`pproxy` exits. Configure VS Code user settings to use the bridge while keeping
-TLS verification enabled:
+`pproxy` exits. Point clients at the bridge while keeping TLS verification
+enabled:
 
 ```json
 {
@@ -281,10 +292,70 @@ TLS verification enabled:
 }
 ```
 
+Set that in the local User settings when VS Code runs on the same host as the
+bridge. For a VS Code window connected to this host over Remote - SSH the value
+belongs in the remote settings instead; see the next subsection.
+
 Verify the route with `curl --proxy http://127.0.0.1:3128
 https://api.ipify.org`; the returned egress address should match the SOCKS
 proxy's. User services normally run while the user manager is active. To start
 both services at boot before login, enable lingering as described above.
+
+### VS Code Remote Extension Host
+
+When VS Code connects to this Linux host over Remote - SSH, workspace
+extensions run in the **remote** extension host on this machine, not on the
+client. A proxy set only in the client's local User settings does not reach them,
+for two reasons:
+
+* `http.proxy` is a machine-scoped setting, so the client's User value is not
+  applied inside the remote extension host.
+* Extensions that use Node's built-in global `fetch` (undici), such as DeepSeek
+  chat extensions, are not covered by the local-proxy forwarding that only
+  patches the `http`/`https` modules.
+
+VS Code's extension host does patch `globalThis.fetch` to use `http.proxy` when
+that setting is present in the **remote** configuration. Install it with the
+provided helper, which merges the values below into
+`~/.vscode-server/data/Machine/settings.json` (which is what *Preferences: Open
+Remote Settings* edits):
+
+```bash
+linux/install-vscode-remote-proxy.sh
+```
+
+```json
+{
+  "http.proxy": "http://127.0.0.1:3128",
+  "http.proxyStrictSSL": true,
+  "http.proxySupport": "override",
+  "http.fetchAdditionalSupport": true,
+  "http.useLocalProxyConfiguration": false
+}
+```
+
+`http.useLocalProxyConfiguration: false` makes the remote resolve its own proxy
+instead of the client's, and `http.fetchAdditionalSupport: true` keeps the
+`fetch` proxy patch enabled. TLS verification remains on
+(`http.proxyStrictSSL: true`); do not disable it. Reload the VS Code window after
+changing these settings so the remote extension host picks them up.
+
+Verify from the remote host without an API key; all three should reach DeepSeek
+and return HTTP 401 rather than a TLS error:
+
+```bash
+curl -v -x http://127.0.0.1:3128 https://api.deepseek.com
+curl -v --proxy socks5h://127.0.0.1:1080 https://api.deepseek.com
+node -e "fetch('https://api.deepseek.com/').then(r=>console.log(r.status)).catch(e=>console.log(e.cause&&e.cause.code))"
+```
+
+A direct `curl -I https://api.deepseek.com` (no proxy) is expected to fail with
+`unable to get local issuer certificate` when the local DNS resolver is
+redirecting the name to an interception/block page; that is why the tunnel is
+required and why the system CA bundle is not the fault. The DeepSeek extension
+log (`~/.vscode-server/data/logs/*/exthost*/Vizards.deepseek-v4-for-copilot/`)
+should show `kind=http` responses instead of
+`kind=network code=UNABLE_TO_GET_ISSUER_CERT_LOCALLY`.
 
 ## Windows Smoke Tests
 
@@ -536,7 +607,10 @@ is never touched.
 - Git SSH remotes or `url.*.insteadOf` rewriting: SSH remotes do not use
   `http.proxy`, so GitHub-over-SSH is unaffected.
 - Any machine-wide or system proxy settings.
-- VS Code `http.proxySupport` and any unrelated settings.
+- VS Code `http.proxySupport` and any unrelated settings. The Linux
+  [remote installer](linux/install-vscode-remote-proxy.sh) does set
+  `http.proxySupport`/`http.fetchAdditionalSupport` deliberately, because the
+  remote extension host needs them to route `fetch` through the bridge.
 - API keys: these scripts never read, store, or print secrets.
 
 ### Client status states
@@ -558,7 +632,10 @@ Exit codes: `install-client.ps1` -> `0` ok, `2` conflicts, `1` preflight failed;
   DSJumper should own that setting.
 - `UNREACHABLE`: the proxy core is failing transport; run `status.ps1` first.
 - VS Code still bypasses the proxy: confirm `http.proxy` in the user
-  `settings.json` and reload the window.
+  `settings.json` and reload the window. When the window is connected to a Linux
+  host over Remote - SSH the extension host runs remotely and needs `http.proxy`
+  in the remote settings instead; see
+  [VS Code Remote Extension Host](#vs-code-remote-extension-host).
 - Restore everything: run `uninstall-client.ps1`.
 
 ## Logs And Troubleshooting
@@ -574,6 +651,7 @@ Exit codes: `install-client.ps1` -> `0` ok, `2` conflicts, `1` preflight failed;
 - Host-key failure: verify S5's fingerprint through a trusted channel. Do not disable strict host checking or blindly replace known-host entries.
 - Port conflict: identify the listener owner before stopping anything. Do not kill unrelated SSH processes.
 - DeepSeek `401` or `403`: check API credentials and access. `429` may indicate quota or rate limiting. A working ipify check alone does not prove API authorization.
+- Remote extension host reports `UNABLE_TO_GET_ISSUER_CERT_LOCALLY` while `curl --proxy http://127.0.0.1:3128 https://api.deepseek.com` returns `401`: the remote extension host is not using the proxy. Set `http.proxy` in the remote settings (see [VS Code Remote Extension Host](#vs-code-remote-extension-host)) and reload the window. Never disable TLS verification. A direct, unproxied request failing TLS is expected when local DNS redirects the name to an interception page; that is not a broken system CA bundle.
 
 For future changes, test on a separate port before touching the production
 listener. Start the supervisor in a separate terminal with `-ListenPort 1081`
@@ -617,3 +695,32 @@ an integrated Agent application.
   `http.proxy`/`http.proxyStrictSSL` already matched and were left untouched).
 - Production core preserved throughout: `1080` and `3128` remained loopback,
   managed, and healthy (egress `72.211.255.176`).
+
+### Phase 3 Linux remote extension host (verified 2026-10-07)
+
+Diagnosed and fixed a VS Code Remote - SSH + DeepSeek failure on the Linux host,
+without weakening TLS and without touching the `1080`/`3128` services.
+
+- Symptom: the DeepSeek extension in the remote extension host reported
+  `kind=network code=UNABLE_TO_GET_ISSUER_CERT_LOCALLY`.
+- Root cause: local DNS redirected `api.deepseek.com` to an interception page, so
+  only the tunnel works; and the extension uses Node global `fetch`, which
+  ignores both the client's local User `http.proxy` (machine-scoped) and the
+  environment, unless the setting is present in the remote configuration.
+- Fix: `~/.vscode-server/data/Machine/settings.json` with `http.proxy`,
+  `http.proxyStrictSSL: true`, `http.proxySupport`, `http.fetchAdditionalSupport`,
+  and `http.useLocalProxyConfiguration: false` (helper:
+  [linux/install-vscode-remote-proxy.sh](linux/install-vscode-remote-proxy.sh)).
+- System CA verified intact (`/etc/ssl/certs/ca-certificates.crt`); no
+  `ca-certificates` change and no `rejectUnauthorized`/`strictSSL` disabling.
+- Transport verified: `curl -x http://127.0.0.1:3128 https://api.deepseek.com`
+  and `curl --proxy socks5h://127.0.0.1:1080 https://api.deepseek.com` each
+  returned HTTP 401; direct (unproxied) returned the expected TLS error.
+- Node verified: Node 24 direct `fetch` reproduced
+  `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`; the same `fetch` with the proxy configured
+  returned 401.
+- VS Code path verified: the product's own `@vscode/proxy-agent`
+  `createProxyResolver` resolved `source:"setting"` -> `http://127.0.0.1:3128`,
+  and the extension's real client, driven through VS Code's patched `fetch`,
+  reached the API and returned `kind=http status=401` (TLS verified) instead of a
+  network error.
