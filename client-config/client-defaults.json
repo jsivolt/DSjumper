@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "httpPort": 3128,
+  "socksPort": 1080,
+  "noProxy": [ "localhost", "127.0.0.1", "::1" ],
+  "environmentProxyKeys": [ "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy" ],
+  "environmentNoProxyKeys": [ "NO_PROXY", "no_proxy" ],
+  "enableAllProxyByDefault": false,
+  "vscode": {
+    "settingsRelativePath": "Code/User/settings.json",
+    "proxyKeys": [ "http.proxy" ],
+    "strictSslKey": "http.proxyStrictSSL",
+    "noProxyKey": "http.noProxy"
+  },
+  "gitProxyKeys": [ "http.proxy", "https.proxy" ]
+}

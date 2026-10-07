@@ -23,6 +23,10 @@ HTTP client (VS Code) -> 127.0.0.1:3128 -> 127.0.0.1:1080 -> SSH over ZeroTier -
 | Windows deployment | [deploy-s5-socks.ps1](deploy-s5-socks.ps1) |
 | API test | [deepseek_smoke.py](deepseek_smoke.py) |
 | Read-only status | [status.ps1](status.ps1) |
+| Client installer | [install-client.ps1](install-client.ps1) |
+| Client uninstaller | [uninstall-client.ps1](uninstall-client.ps1) |
+| Client status | [client-status.ps1](client-status.ps1) |
+| Client defaults/state | [client-config/](client-config) |
 
 The workspace on VM2 is installed at `C:\Users\celltester\DSjumper`. On another
 computer, run the scripts from a stable folder owned by the current user. The
@@ -340,6 +344,120 @@ environment and will not open an interactive paid prompt. It classifies `401`,
 `403`, `429`, and `5xx` separately, never prints the API key, and never restarts
 anything.
 
+## Client Setup (Zero-Friction, Client Side)
+
+Phase 2 configures how *local clients on a Windows machine* reach the existing
+DSJumper loopback proxy so a new machine does not need manual reconfiguration.
+It is client-side only and never touches the production proxy core (no
+supervisors, listeners, scheduled tasks, SSH, or ports).
+
+```powershell
+.\install-client.ps1                 # configure this machine
+.\client-status.ps1                  # verify readiness
+.\client-status.ps1 -DeepSeekCheck   # optional paid API check
+.\uninstall-client.ps1               # roll back to previous values
+```
+
+### What install-client.ps1 configures
+
+| Target | Setting | Value |
+| --- | --- | --- |
+| Environment (User scope) | `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, `https_proxy` | `http://127.0.0.1:3128` |
+| Environment (User scope) | `NO_PROXY`, `no_proxy` | `localhost,127.0.0.1,::1` |
+| Git (global) | `http.proxy`, `https.proxy` | `http://127.0.0.1:3128` |
+| VS Code user `settings.json` | `http.proxy` | `http://127.0.0.1:3128` |
+| VS Code user `settings.json` | `http.proxyStrictSSL` | `true` |
+| VS Code user `settings.json` | `http.noProxy` | `["localhost", "127.0.0.1", "::1"]` |
+
+`ALL_PROXY`/`all_proxy` are **not** set by default: they would force the SOCKS
+proxy on every protocol, including tools that should stay local. Use
+`-EnableAllProxy` to opt in.
+
+Environment variables are **user-level**, not machine-level, and apply to newly
+launched processes. `NO_PROXY` keeps loopback/local traffic off the proxy. The
+installer patches only the VS Code keys it owns and preserves the rest of
+`settings.json` (including comments and unrelated keys), so it does not replace
+your whole settings file.
+
+On Windows the environment is case-insensitive, so the upper- and lower-case
+`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` names refer to the **same** variables. The
+installer therefore writes three real user variables (`http_proxy`,
+`https_proxy`, `no_proxy`) that satisfy both spellings; the mixed-case names in
+the table are the lowercase ones on Windows.
+
+### Health gating
+
+Before changing anything, the installer runs the existing [status.ps1](status.ps1)
+and requires the HTTP transport to pass ("a port is listening" is not enough). If
+DSJumper is unreachable it aborts without configuring clients; use `-Force` to
+override.
+
+### Idempotency
+
+Values that are already correct are left untouched; the installer does not rewrite
+`settings.json` or re-set variables when nothing needs to change. Re-running is
+safe.
+
+### Conflicts
+
+- If an environment variable, Git proxy, or VS Code key already holds an
+  **unrelated** value, the installer leaves it alone and reports `CONFLICT`
+  (exit code `2`). Use `-Force` to replace it; the prior value is still backed up.
+- Git proxy changes are verified against `https://github.com`; if verification
+  fails, the Git change is reverted automatically.
+
+### Rollback
+
+`install-client.ps1` records previous values in `client-config/state.json`
+(no secrets) and backs up `settings.json` under `client-config/backup/`.
+`uninstall-client.ps1` restores the exact previous values, or removes variables
+and keys DSJumper created, then deletes the state file. Other user configuration
+is never touched.
+
+### Options
+
+| Option | Effect |
+| --- | --- |
+| `-SkipEnvironment` / `-SkipGit` / `-SkipVsCode` | Skip a target |
+| `-Force` | Replace conflicting values (still reversible) |
+| `-EnableAllProxy` | Also set `ALL_PROXY`/`all_proxy` to the SOCKS proxy |
+| `-EnvScope User\|Process\|Machine` | Environment scope (default `User`) |
+| `-SettingsPath` / `-StatePath` / `-ConfigDir` | Override paths (used in tests) |
+| `-StatusScript` | Override `status.ps1` |
+| `-WhatIf` | Show planned changes without writing anything |
+| `-DeepSeekCheck` | Optional paid API test (requires `DEEPSEEK_API_KEY`) |
+
+### Intentionally not configured
+
+- `ALL_PROXY` (see above).
+- Git SSH remotes or `url.*.insteadOf` rewriting: SSH remotes do not use
+  `http.proxy`, so GitHub-over-SSH is unaffected.
+- Any machine-wide or system proxy settings.
+- VS Code `http.proxySupport` and any unrelated settings.
+- API keys: these scripts never read, store, or print secrets.
+
+### Client status states
+
+`client-status.ps1` reports `PASS`/`FAIL` for DSJumper (reusing `status.ps1` for
+health/transport) and meaningful client states: `CONFIGURED`, `NOT_CONFIGURED`,
+`PARTIAL`, `CONFLICT`, `NOT NEEDED`, `ENV-ONLY`, `NOT INSTALLED`, `NOT TESTED`.
+The overall state is one of `READY`, `PARTIAL`, `CONFLICT`, `UNREACHABLE`, or
+`NOT_CONFIGURED`.
+
+Exit codes: `install-client.ps1` -> `0` ok, `2` conflicts, `1` preflight failed;
+`client-status.ps1` -> `0` READY, `1` not ready, `2` unreachable.
+
+### Troubleshooting
+
+- Proxy works but `Environment NOT_CONFIGURED`: open a new terminal; new processes
+  pick up the new variables.
+- `CONFLICT`: an unrelated value exists; review it, then re-run with `-Force` if
+  DSJumper should own that setting.
+- `UNREACHABLE`: the proxy core is failing transport; run `status.ps1` first.
+- VS Code still bypasses the proxy: confirm `http.proxy` in the user
+  `settings.json` and reload the window.
+- Restore everything: run `uninstall-client.ps1`.
+
 ## Logs And Troubleshooting
 
 - [s5-socks-1080.log](s5-socks-1080.log): supervisor starts, child PIDs, exits, and retry delays. Rotates to a `.previous` file after exceeding approximately 512 KiB.
@@ -379,3 +497,20 @@ The logon trigger configuration was inspected, but an actual reboot/logon was
 not exercised. The task is installed on VM2; these files alone do not register it
 on another machine. The project currently contains a standalone smoke test, not
 an integrated Agent application.
+
+### Phase 2 client setup (verified 2026-10-07)
+
+- Non-destructive suite (temporary paths, fake tools, stub status, sanitized
+  PATH): 35/35 checks passed, covering fresh install, matching config
+  (idempotent, no rewrite), conflicting proxy (no silent overwrite; `-Force`
+  replaces with backup), Git conflict/absent, VS Code absent, DSJumper
+  unavailable (aborts unless `-Force`), repeated install, and paths with spaces.
+- Reversible live round-trip on VM2: `install-client.ps1` -> `client-status.ps1`
+  (`READY`) -> `uninstall-client.ps1` -> restore verified (environment, Git, and
+  `settings.json` restored exactly) -> reinstall -> idempotent no-op. 13/13 checks
+  passed.
+- Applied on VM2: user variables `http_proxy`/`https_proxy`/`no_proxy`; Git
+  global `http.proxy`/`https.proxy`; VS Code user `http.noProxy` added (existing
+  `http.proxy`/`http.proxyStrictSSL` already matched and were left untouched).
+- Production core preserved throughout: `1080` and `3128` remained loopback,
+  managed, and healthy (egress `72.211.255.176`).

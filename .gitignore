@@ -3,3 +3,6 @@ __pycache__/
 *.py[cod]
 
 *.log
+
+client-config/state.json
+client-config/backup/
