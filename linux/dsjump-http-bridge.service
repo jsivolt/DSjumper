@@ -1,0 +1,16 @@
+[Unit]
+Description=DSJumper HTTP CONNECT bridge
+Wants=dsjump-socks.service
+After=dsjump-socks.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=%h/DSjumper
+ExecStart=%h/DSjumper/.venv/bin/python -m pproxy -l http://127.0.0.1:3128 -r socks5://127.0.0.1:1080
+Restart=always
+RestartSec=5
+UMask=0077
+
+[Install]
+WantedBy=default.target

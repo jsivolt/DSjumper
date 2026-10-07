@@ -259,15 +259,32 @@ Use `journalctl --user -u dsjump-socks.service -f` for service logs. The
 does not set global proxy variables or expose the SOCKS port beyond loopback.
 
 The optional HTTP CONNECT bridge for clients such as VS Code requires the
-Python dependencies from `requirements.txt`; it can be started with:
+Python dependencies from `requirements.txt`. Install and enable its user unit:
 
 ```bash
-.venv/bin/python -m pproxy -l http://127.0.0.1:3128 -r socks5://127.0.0.1:1080
+install -D -m 644 linux/dsjump-http-bridge.service \
+  ~/.config/systemd/user/dsjump-http-bridge.service
+systemctl --user daemon-reload
+systemctl --user enable --now dsjump-http-bridge.service
+systemctl --user status dsjump-http-bridge.service
 ```
 
-This command is foreground-only; the included Linux unit manages only the
-SOCKS tunnel. The bridge must also bind to loopback and be separately supervised
-if persistent HTTP-proxy access is required.
+The bridge binds to `127.0.0.1:3128` and forwards through
+`socks5://127.0.0.1:1080`. It starts after the SOCKS tunnel and restarts if
+`pproxy` exits. Configure VS Code user settings to use the bridge while keeping
+TLS verification enabled:
+
+```json
+{
+  "http.proxy": "http://127.0.0.1:3128",
+  "http.proxyStrictSSL": true
+}
+```
+
+Verify the route with `curl --proxy http://127.0.0.1:3128
+https://api.ipify.org`; the returned egress address should match the SOCKS
+proxy's. User services normally run while the user manager is active. To start
+both services at boot before login, enable lingering as described above.
 
 ## Windows Smoke Tests
 
