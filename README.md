@@ -22,6 +22,7 @@ HTTP client (VS Code) -> 127.0.0.1:3128 -> 127.0.0.1:1080 -> SSH over ZeroTier -
 | Bridge supervisor | [start-http-bridge.ps1](start-http-bridge.ps1) |
 | Windows deployment | [deploy-s5-socks.ps1](deploy-s5-socks.ps1) |
 | API test | [deepseek_smoke.py](deepseek_smoke.py) |
+| Read-only status | [status.ps1](status.ps1) |
 
 The workspace on VM2 is installed at `C:\Users\celltester\DSjumper`. On another
 computer, run the scripts from a stable folder owned by the current user. The
@@ -233,6 +234,9 @@ Get-ScheduledTaskInfo -TaskName 'DeepSeek-S5-HTTP-Bridge'
 Get-NetTCPConnection -LocalPort 3128 -State Listen
 ```
 
+For a combined health, ownership, and transport view that applies the state model
+below, run [status.ps1](status.ps1) instead of assembling these commands by hand.
+
 Both listeners must bind only to `127.0.0.1`. For `1080`, the owning process
 should be `ssh.exe` with a parent PowerShell process running the supervisor,
 because the supervisor starts SSH directly. For `3128`, do not check a single
@@ -267,6 +271,74 @@ port and waits rather than competing or killing it. To hand the port back to the
 task cleanly, stop the orphan `pproxy` for `3128` first (identify it with
 `Get-NetTCPConnection -LocalPort 3128 -State Listen`), or simply log off and back
 on so the task starts with the port free.
+
+## Operational Status And State Model
+
+[status.ps1](status.ps1) is a read-only operational diagnostic. It reports a
+per-component state for `1080` and `3128`, derives an overall state, and clearly
+distinguishes "working" from "managed and healthy". It never stops or starts
+processes, restarts or modifies scheduled tasks, changes ports, SSH
+configuration, or proxy settings, and it does not call the paid DeepSeek API
+unless you explicitly pass `-DeepSeekCheck`.
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\status.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\status.ps1 -DeepSeekCheck
+```
+
+### States
+
+| State | Meaning |
+| --- | --- |
+| `HEALTHY` | expected listener exists, binds loopback only, is owned by the expected supervisor process tree, and local proxy transport succeeds. |
+| `UNMANAGED` | listener exists and transport works, but it is not owned by the expected supervisor process tree (for example a surviving orphan). Reported, never killed. |
+| `BLOCKED` | the port is occupied by an unrecognized listener whose transport fails. Reported, never killed or replaced. |
+| `DEGRADED` | the expected listener/process exists, but transport fails, or the listener is not loopback-only. |
+| `STOPPED` | the expected task/supervisor/listener is absent. |
+| `STARTING` | the task/supervisor exists but the expected listener is not ready yet. |
+
+Key semantics:
+
+- A port listening is **not** equivalent to `HEALTHY`.
+- Transport working is **not** equivalent to `MANAGED`.
+- `UNMANAGED` and `BLOCKED` are diagnostic states, not automatic repair
+  triggers. This tool never kills or replaces a listener.
+
+### Ownership
+
+Ownership is determined by walking the listener's ancestor chain
+(`ParentProcessId` up to a bounded depth) and checking whether
+`start-s5-socks.ps1` (for `1080`) or `start-http-bridge.ps1` (for `3128`) appears
+in it, never by a single parent link. For `1080` the listener is `ssh.exe`, a
+direct child of the supervisor; for `3128` the listener is a `python.exe`
+running `pproxy`, often a grandchild. SSH command identity is printed with the
+private-key path redacted; secrets are never shown.
+
+### Transport checks
+
+Each component is probed through its own local proxy
+(`socks5h://127.0.0.1:1080` and `http://127.0.0.1:3128`) against two lightweight
+HTTPS targets (`https://api.ipify.org` and `https://icanhazip.com`). If one
+target fails while another succeeds, the result is `PARTIAL` and is treated as
+an endpoint-specific failure, not immediately as a tunnel failure; only when all
+targets fail is transport `FAIL`. The observed egress IP is reported so the
+`3128` and `1080` egress addresses can be compared.
+
+### Overall state
+
+The overall state is the most severe component state (`BLOCKED` > `DEGRADED` >
+`STOPPED`). A component that is working but not owned by the expected supervisor
+(`UNMANAGED`) or still coming up (`STARTING`) is surfaced as an explicit warning
+and left visible in its own section rather than being hidden or treated as a
+failure.
+
+### Optional DeepSeek check
+
+`-DeepSeekCheck` runs the existing [deepseek_smoke.py](deepseek_smoke.py) smoke
+test, which may incur usage charges. It requires `DEEPSEEK_API_KEY` in the
+environment and will not open an interactive paid prompt. It classifies `401`,
+`403`, `429`, and `5xx` separately, never prints the API key, and never restarts
+anything.
 
 ## Logs And Troubleshooting
 
